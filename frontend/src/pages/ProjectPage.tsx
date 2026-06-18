@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { api, type LLMProvider, type Message, type Project, type ProjectFile, type Prompt } from '../lib/api'
 import { Button } from '../components/ui/Button'
+import { ChatMessageContent } from '../components/ChatMessageContent'
 import { Input } from '../components/ui/Input'
 import { Select } from '../components/ui/Select'
 import { Textarea } from '../components/ui/Textarea'
@@ -327,13 +328,16 @@ export function ProjectPage({ projectId }: Props) {
                 >
                   <div
                     className={cn(
-                      'max-w-[80%] px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap',
+                      'max-w-[80%] px-4 py-3 rounded-2xl text-sm leading-relaxed',
                       msg.role === 'user'
                         ? 'bg-accent text-white rounded-br-md'
                         : 'bg-surface-card border border-border text-text rounded-bl-md',
                     )}
                   >
-                    {msg.content}
+                    <ChatMessageContent
+                      content={msg.content}
+                      variant={msg.role === 'user' ? 'user' : 'assistant'}
+                    />
                   </div>
                 </div>
               ))}
@@ -348,9 +352,9 @@ export function ProjectPage({ projectId }: Props) {
               )}
               {streaming && (
                 <div className="flex justify-start">
-                  <div className="max-w-[80%] px-4 py-3 rounded-2xl rounded-bl-md text-sm leading-relaxed whitespace-pre-wrap bg-surface-card border border-border text-text">
-                    {streaming}
-                    <span className="inline-block w-2 h-4 bg-accent ml-1 animate-pulse" />
+                  <div className="max-w-[80%] px-4 py-3 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-surface-card border border-border text-text">
+                    <ChatMessageContent content={streaming} variant="assistant" />
+                    <span className="inline-block w-2 h-4 bg-accent ml-1 animate-pulse align-middle" />
                   </div>
                 </div>
               )}
