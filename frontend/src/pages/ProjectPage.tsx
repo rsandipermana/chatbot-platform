@@ -34,8 +34,10 @@ const PROVIDER_OPTIONS = [
 const MODEL_SUGGESTIONS: Record<LLMProvider, string[]> = {
   openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'],
   openrouter: ['openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet', 'google/gemini-2.0-flash-001'],
-  custom: ['gpt-4o-mini'],
+  custom: ['glm-5.1', 'glm-5.2', 'gpt-4o-mini', 'llama-3.3-70b-versatile'],
 }
+
+type ChatStatus = 'idle' | 'connecting' | 'thinking' | 'streaming'
 
 export function ProjectPage({ projectId }: Props) {
   const [project, setProject] = useState<Project | null>(null)
@@ -45,6 +47,7 @@ export function ProjectPage({ projectId }: Props) {
   const [files, setFiles] = useState<ProjectFile[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
+  const [chatStatus, setChatStatus] = useState<ChatStatus>('idle')
   const [sending, setSending] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -93,7 +96,14 @@ export function ProjectPage({ projectId }: Props) {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, streaming])
+  }, [messages, streaming, chatStatus])
+
+  const statusLabel: Record<ChatStatus, string> = {
+    idle: '',
+    connecting: 'Menghubungkan ke AI...',
+    thinking: 'AI sedang memproses...',
+    streaming: 'AI sedang mengetik...',
+  }
 
   const handleSend = async () => {
     if (!input.trim() || sending) return
@@ -101,6 +111,7 @@ export function ProjectPage({ projectId }: Props) {
     setInput('')
     setSending(true)
     setStreaming('')
+    setChatStatus('connecting')
     setError('')
 
     const tempUser: Message = {
@@ -114,20 +125,26 @@ export function ProjectPage({ projectId }: Props) {
 
     try {
       for await (const event of api.chatStream(projectId, text)) {
-        if (event.type === 'token') {
+        if (event.type === 'status') {
+          setChatStatus(event.content as ChatStatus)
+        } else if (event.type === 'token') {
+          setChatStatus('streaming')
           setStreaming((s) => s + event.content)
         } else if (event.type === 'error') {
           setError(event.content)
         } else if (event.type === 'done') {
           setMessages((m) => [...m, event.message])
           setStreaming('')
+          setChatStatus('idle')
         }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Chat failed')
       setStreaming('')
+      setChatStatus('idle')
     } finally {
       setSending(false)
+      setChatStatus('idle')
     }
   }
 
@@ -232,6 +249,33 @@ export function ProjectPage({ projectId }: Props) {
 
         {tab === 'chat' && (
           <div className="flex flex-col flex-1 min-h-0 glass rounded-2xl overflow-hidden">
+            {chatStatus !== 'idle' && (
+              <div className="relative h-1 bg-surface-card shrink-0 overflow-hidden">
+                <div className="absolute inset-0 bg-accent/20" />
+                <div
+                  className={cn(
+                    'absolute inset-y-0 left-0 bg-accent transition-all duration-300',
+                    chatStatus === 'connecting' && 'w-1/4 animate-pulse',
+                    chatStatus === 'thinking' && 'w-1/2 animate-pulse',
+                    chatStatus === 'streaming' && 'w-full animate-[shimmer_1.5s_ease-in-out_infinite]',
+                  )}
+                  style={
+                    chatStatus === 'streaming'
+                      ? { background: 'linear-gradient(90deg, transparent, var(--color-accent), transparent)', backgroundSize: '200% 100%' }
+                      : undefined
+                  }
+                />
+              </div>
+            )}
+            {chatStatus !== 'idle' && (
+              <div className="px-4 py-2 border-b border-border-subtle flex items-center gap-2 text-xs text-text-muted shrink-0">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-accent" />
+                </span>
+                {statusLabel[chatStatus]}
+              </div>
+            )}
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
               {messages.length === 0 && !streaming && (
                 <div className="text-center py-16">
@@ -261,6 +305,15 @@ export function ProjectPage({ projectId }: Props) {
                   </div>
                 </div>
               ))}
+              {chatStatus !== 'idle' && !streaming && (
+                <div className="flex justify-start">
+                  <div className="px-4 py-3 rounded-2xl rounded-bl-md bg-surface-card border border-border flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-text-muted animate-bounce [animation-delay:0ms]" />
+                    <span className="w-2 h-2 rounded-full bg-text-muted animate-bounce [animation-delay:150ms]" />
+                    <span className="w-2 h-2 rounded-full bg-text-muted animate-bounce [animation-delay:300ms]" />
+                  </div>
+                </div>
+              )}
               {streaming && (
                 <div className="flex justify-start">
                   <div className="max-w-[80%] px-4 py-3 rounded-2xl rounded-bl-md text-sm leading-relaxed whitespace-pre-wrap bg-surface-card border border-border text-text">
@@ -334,7 +387,7 @@ export function ProjectPage({ projectId }: Props) {
                     ...settingsForm,
                     llm_provider: provider,
                     llm_model: MODEL_SUGGESTIONS[provider][0],
-                    llm_base_url: provider === 'openrouter' ? 'https://openrouter.ai/api/v1' : provider === 'custom' ? 'http://localhost:11434/v1' : '',
+                    llm_base_url: provider === 'openrouter' ? 'https://openrouter.ai/api/v1' : provider === 'custom' ? 'https://api.z.ai/api/paas/v4' : '',
                   })
                 }}
                 options={PROVIDER_OPTIONS}
@@ -354,7 +407,7 @@ export function ProjectPage({ projectId }: Props) {
                   settingsForm.llm_provider === 'openrouter'
                     ? 'https://openrouter.ai/api/v1'
                     : settingsForm.llm_provider === 'custom'
-                      ? 'http://localhost:11434/v1'
+                      ? 'https://api.z.ai/api/paas/v4'
                       : 'Default OpenAI endpoint'
                 }
               />

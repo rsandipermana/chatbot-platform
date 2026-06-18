@@ -8,7 +8,8 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.models import Message, Project, User
 from app.schemas import ChatRequest, ChatResponse, MessageResponse
-from app.services.llm import chat_completion, chat_completion_stream
+from app.database import SessionLocal
+from app.services.llm import chat_completion, chat_completion_stream_with_config, project_to_config
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["chat"])
 
@@ -92,21 +93,49 @@ async def chat_stream(
     db.commit()
     db.refresh(user_msg)
 
+    llm_config = project_to_config(project)
+    history_input = [
+        {"role": m.role, "content": m.content}
+        for m in history
+        if m.role in ("user", "assistant")
+    ]
+
     async def event_generator():
+        yield f"data: {json.dumps({'type': 'status', 'content': 'connecting'})}\n\n"
         full = []
+        started = False
         try:
-            async for token in chat_completion_stream(project, history, payload.message):
+            yield f"data: {json.dumps({'type': 'status', 'content': 'thinking'})}\n\n"
+            async for token in chat_completion_stream_with_config(
+                llm_config,
+                history_input,
+                payload.message,
+            ):
+                if not started:
+                    started = True
+                    yield f"data: {json.dumps({'type': 'status', 'content': 'streaming'})}\n\n"
                 full.append(token)
                 yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
         except HTTPException as e:
             yield f"data: {json.dumps({'type': 'error', 'content': e.detail})}\n\n"
             return
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+            return
 
         assistant_text = "".join(full)
-        assistant_msg = Message(project_id=project_id, role="assistant", content=assistant_text)
-        db.add(assistant_msg)
-        db.commit()
-        db.refresh(assistant_msg)
-        yield f"data: {json.dumps({'type': 'done', 'message': MessageResponse.model_validate(assistant_msg).model_dump(mode='json')})}\n\n"
+        if not assistant_text:
+            yield f"data: {json.dumps({'type': 'error', 'content': 'Empty response from LLM'})}\n\n"
+            return
+
+        save_db = SessionLocal()
+        try:
+            assistant_msg = Message(project_id=project_id, role="assistant", content=assistant_text)
+            save_db.add(assistant_msg)
+            save_db.commit()
+            save_db.refresh(assistant_msg)
+            yield f"data: {json.dumps({'type': 'done', 'message': MessageResponse.model_validate(assistant_msg).model_dump(mode='json')})}\n\n"
+        finally:
+            save_db.close()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
