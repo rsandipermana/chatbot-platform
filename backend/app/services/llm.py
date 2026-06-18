@@ -145,9 +145,36 @@ def _chat_completions_headers(config: LLMProjectConfig) -> dict[str, str]:
     return headers
 
 
+def _is_zai_glm_model(config: LLMProjectConfig) -> bool:
+    model = config.llm_model.lower()
+    base = (config.llm_base_url or "").lower()
+    return "glm-" in model or "z.ai" in base
+
+
 def _chat_completions_url(config: LLMProjectConfig) -> str:
     base = _resolve_base_url(config) or "https://openrouter.ai/api/v1"
     return f"{base.rstrip('/')}/chat/completions"
+
+
+def _extract_message_content(message: dict) -> str:
+    """Return only user-visible content, never internal reasoning traces."""
+    return (message.get("content") or "").strip()
+
+
+def _chat_completions_payload(
+    config: LLMProjectConfig,
+    messages: list[dict],
+    *,
+    stream: bool = False,
+) -> dict:
+    payload: dict = {"model": config.llm_model, "messages": messages}
+    if stream:
+        payload["stream"] = True
+    if _is_zai_glm_model(config):
+        # GLM-5.x enables thinking by default; disable for user-facing chat.
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+        payload["thinking"] = {"type": "disabled"}
+    return payload
 
 
 async def _chat_completions(
@@ -161,7 +188,7 @@ async def _chat_completions(
         full_messages.append({"role": "system", "content": instructions})
     full_messages.extend(messages)
 
-    payload = {"model": config.llm_model, "messages": full_messages}
+    payload = _chat_completions_payload(config, full_messages)
 
     async with httpx.AsyncClient(timeout=120.0) as http:
         resp = await http.post(
@@ -176,7 +203,7 @@ async def _chat_completions(
             )
         data = resp.json()
         message = data["choices"][0]["message"]
-        content = message.get("content") or message.get("reasoning_content") or ""
+        content = _extract_message_content(message)
         if not content:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Empty response from LLM")
         return content
@@ -236,7 +263,7 @@ async def _chat_completions_stream(
         full_messages.append({"role": "system", "content": instructions})
     full_messages.extend(messages)
 
-    payload = {"model": config.llm_model, "messages": full_messages, "stream": True}
+    payload = _chat_completions_payload(config, full_messages, stream=True)
 
     async with httpx.AsyncClient(timeout=120.0) as http:
         async with http.stream(
@@ -260,7 +287,8 @@ async def _chat_completions_stream(
                 try:
                     data = json.loads(data_str)
                     delta_obj = data.get("choices", [{}])[0].get("delta", {})
-                    delta = delta_obj.get("content") or delta_obj.get("reasoning_content") or ""
+                    # Only stream final answer tokens, skip reasoning_content.
+                    delta = delta_obj.get("content") or ""
                     if delta:
                         yield delta
                 except json.JSONDecodeError:
