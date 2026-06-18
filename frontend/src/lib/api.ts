@@ -143,6 +143,9 @@ export const api = {
 
   listMessages: (projectId: number) => request<Message[]>(`/projects/${projectId}/messages`),
 
+  clearMessages: (projectId: number) =>
+    request<void>(`/projects/${projectId}/messages`, { method: 'DELETE' }),
+
   chat: (projectId: number, message: string) =>
     request<{ user_message: Message; assistant_message: Message }>(`/projects/${projectId}/chat`, {
       method: 'POST',

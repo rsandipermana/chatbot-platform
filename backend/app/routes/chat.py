@@ -40,6 +40,17 @@ def list_messages(
     )
 
 
+@router.delete("/messages", status_code=status.HTTP_204_NO_CONTENT)
+def clear_messages(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _get_owned_project(project_id, current_user, db)
+    db.query(Message).filter(Message.project_id == project_id).delete()
+    db.commit()
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     project_id: int,

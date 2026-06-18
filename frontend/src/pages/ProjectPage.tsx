@@ -50,6 +50,7 @@ export function ProjectPage({ projectId }: Props) {
   const [chatStatus, setChatStatus] = useState<ChatStatus>('idle')
   const [sending, setSending] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [clearing, setClearing] = useState(false)
   const [error, setError] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -145,6 +146,23 @@ export function ProjectPage({ projectId }: Props) {
     } finally {
       setSending(false)
       setChatStatus('idle')
+    }
+  }
+
+  const handleClearHistory = async () => {
+    if (sending || messages.length === 0) return
+    if (!confirm('Hapus semua riwayat chat? Tindakan ini tidak dapat dibatalkan.')) return
+    setClearing(true)
+    setError('')
+    try {
+      await api.clearMessages(projectId)
+      setMessages([])
+      setStreaming('')
+      setChatStatus('idle')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Gagal menghapus riwayat')
+    } finally {
+      setClearing(false)
     }
   }
 
@@ -249,6 +267,20 @@ export function ProjectPage({ projectId }: Props) {
 
         {tab === 'chat' && (
           <div className="flex flex-col flex-1 min-h-0 glass rounded-2xl overflow-hidden">
+            {messages.length > 0 && chatStatus === 'idle' && (
+              <div className="px-4 py-2 border-b border-border-subtle flex justify-end shrink-0">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleClearHistory}
+                  loading={clearing}
+                  disabled={sending}
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Hapus Riwayat
+                </Button>
+              </div>
+            )}
             {chatStatus !== 'idle' && (
               <div className="relative h-1 bg-surface-card shrink-0 overflow-hidden">
                 <div className="absolute inset-0 bg-accent/20" />
