@@ -19,7 +19,7 @@ A minimal multi-user chatbot platform with JWT authentication, project/agent man
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.11+ (3.14 supported; use `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` when creating venv on 3.14)
 - Node.js 18+
 - An API key from [OpenAI](https://platform.openai.com/) or [OpenRouter](https://openrouter.ai/)
 
