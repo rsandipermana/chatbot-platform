@@ -1,139 +1,292 @@
 # Architecture & Design
 
-## Overview
+Brief explanation of how the Chatbot Platform is structured, how data flows through the system, and the design decisions behind it.
 
-Chatbot Platform is a full-stack web application that enables multiple users to create AI chatbot agents with customizable LLM configurations. The system follows a classic three-tier architecture:
+For setup and API reference, see the [main README](../README.md).
+
+---
+
+## System Overview
+
+A multi-user web app where each user creates **projects** (AI agents) with their own LLM provider, API key, model, prompts, and chat history. The stack is a classic three-tier SPA + API:
 
 ```
-┌─────────────┐     HTTPS/REST     ┌─────────────┐     API Calls     ┌──────────────┐
-│   React     │ ◄────────────────► │   FastAPI   │ ◄───────────────► │  LLM Service │
-│  Frontend   │    JWT Auth + SSE  │   Backend   │  OpenAI/OpenRouter│  (External)  │
-└─────────────┘                    └──────┬──────┘                   └──────────────┘
-                                          │
-                                   ┌──────▼──────┐
-                                   │   SQLite /   │
-                                   │  PostgreSQL  │
-                                   └─────────────┘
+┌─────────────────┐   REST + SSE (JWT)   ┌─────────────────┐   HTTPS API    ┌──────────────────┐
+│  React Frontend │ ◄──────────────────► │  FastAPI Backend │ ◄────────────► │  LLM Providers   │
+│  (Vite, TS)     │                      │  (Python 3.11+)  │                │  OpenAI / Router │
+└─────────────────┘                      └────────┬────────┘                └──────────────────┘
+                                                  │
+                                           ┌──────▼──────┐
+                                           │   SQLite or  │
+                                           │  PostgreSQL  │
+                                           └─────────────┘
 ```
+
+| Layer | Technology | Responsibility |
+|-------|------------|----------------|
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS v4 | Auth UI, agent management, streaming chat |
+| Backend | FastAPI, SQLAlchemy, Pydantic | REST API, JWT auth, LLM orchestration |
+| Data | SQLite (dev) / PostgreSQL (prod) | Users, projects, messages, file metadata |
+| External | OpenAI SDK, httpx | LLM inference and file storage |
+
+---
 
 ## Design Principles
 
-### Scalability
+### Multi-tenant isolation
 
-- **Stateless API**: JWT tokens carry authentication; no server-side sessions. Horizontal scaling is straightforward.
-- **Per-project LLM config**: Each agent has isolated LLM settings, allowing different providers/models per use case.
-- **Streaming responses**: Server-Sent Events (SSE) reduce perceived latency for chat.
-- **Database abstraction**: SQLAlchemy ORM supports swapping SQLite (dev) for PostgreSQL (production).
+Every resource is scoped to a **user**. Route handlers call `_get_owned_project()` (or equivalent filters) before reading or mutating data. A user never sees another user's projects, messages, prompts, or files.
 
-### Security
+### Stateless API
 
-- **Password hashing**: bcrypt via passlib; passwords never stored in plaintext.
-- **JWT authentication**: Short-lived tokens with HS256 signing; all protected routes require valid Bearer token.
-- **Authorization**: Users can only access their own projects, prompts, messages, and files (enforced at route level).
-- **API keys**: Stored per-project in the database; only returned to the owning user via authenticated endpoints.
+Authentication uses **JWT Bearer tokens** (HS256, 7-day expiry by default). No server-side sessions. The API can scale horizontally without sticky sessions.
 
-### Extensibility
+### Per-agent LLM configuration
 
-The modular structure supports future additions:
+Each project stores its own provider, API key, base URL, and model. One user can run OpenAI on one agent and a local Ollama endpoint on another without global provider settings.
 
-| Module | Extension Point |
-|--------|----------------|
-| `services/llm.py` | Add new LLM providers by implementing adapter functions |
-| `routes/` | New route modules for analytics, webhooks, integrations |
-| `models.py` | New entities (teams, API usage logs, webhooks) |
-| Frontend tabs | Plugin-style UI panels per feature |
+### Provider abstraction
 
-### Performance
+`backend/app/services/llm.py` centralizes provider differences behind two entry points:
 
-- Async FastAPI handlers for I/O-bound LLM calls
-- Streaming chat avoids waiting for full response before displaying tokens
-- Database indexes on `user_id`, `project_id` foreign keys
-- Frontend proxy in dev; CDN-ready static build for production
+- `chat_completion_with_config()` — full response
+- `chat_completion_stream_with_config()` — token stream
 
-### Reliability
+Configuration is passed as a detached `LLMProjectConfig` dataclass so streaming handlers can work outside the original SQLAlchemy session.
 
-- Structured HTTP error responses with meaningful messages
-- LLM errors caught and returned as 502 with detail
-- Graceful handling of missing API keys before making external calls
-- File upload size limit (20MB)
+### Streaming first
+
+The primary chat path is **Server-Sent Events (SSE)**. Tokens are forwarded to the client as they arrive, reducing perceived latency. The complete assistant reply is persisted only after the stream finishes.
+
+---
+
+## Backend Structure
+
+```
+backend/app/
+├── main.py           # App factory, CORS, router registration, DB init on startup
+├── config.py         # Settings from environment (.env)
+├── database.py       # SQLAlchemy engine, SessionLocal, get_db dependency
+├── models.py         # ORM entities
+├── schemas.py        # Pydantic request/response models
+├── auth.py           # Password hashing, JWT create/decode, get_current_user
+├── routes/
+│   ├── auth.py       # register, login, me
+│   ├── projects.py   # CRUD for agents
+│   ├── prompts.py    # Named prompt templates per project
+│   ├── chat.py       # Messages, chat, streaming chat
+│   └── files.py      # File upload metadata (OpenAI Files API)
+└── services/
+    └── llm.py        # Provider routing, instruction building, streaming
+```
+
+Routers are mounted under `/api` in `main.py`. A health check lives at `GET /api/health`.
+
+---
 
 ## Data Model
 
 ```
 User
- ├── Project (1:N)
- │    ├── Prompt (1:N)      — named prompt templates
- │    ├── Message (1:N)     — chat history
- │    └── ProjectFile (1:N) — uploaded files
+ └── Project (1:N)          ← "agent" in the UI
+      ├── Prompt (1:N)      ← named instruction blocks
+      ├── Message (1:N)     ← chat history (user | assistant)
+      └── ProjectFile (1:N) ← upload metadata + OpenAI file ID
 ```
 
-### Key Entities
+### Entities
 
-- **User**: Email + hashed password. Owns all projects.
-- **Project**: An AI agent with LLM configuration (provider, API key, model, base URL) and optional system prompt.
-- **Prompt**: Named content blocks merged into the LLM instructions at chat time.
-- **Message**: User/assistant messages forming conversation history.
-- **ProjectFile**: Metadata for files uploaded to OpenAI Files API.
+| Entity | Purpose |
+|--------|---------|
+| **User** | Email + bcrypt-hashed password |
+| **Project** | Agent name, system prompt, LLM provider (`openai` \| `openrouter` \| `custom`), API key, base URL, model |
+| **Prompt** | Named content merged into LLM instructions at chat time |
+| **Message** | Persisted chat turns; only `user` and `assistant` roles are sent to the LLM |
+| **ProjectFile** | Local record of an upload; `openai_file_id` set when stored via OpenAI Files API |
+
+Cascade deletes ensure removing a project removes all child records.
+
+API keys are stored in the database and exposed only to the owning user on `GET /api/projects/{id}` and `PATCH`. List endpoints return `has_api_key: boolean` instead of the raw key.
+
+---
 
 ## Authentication Flow
 
 ```
-1. POST /auth/register  →  Create user, hash password
-2. POST /auth/login     →  Verify credentials, return JWT
-3. Client stores token  →  localStorage
-4. All API calls        →  Authorization: Bearer <token>
-5. Backend middleware   →  Decode JWT, load user, enforce ownership
+Register/Login
+     │
+     ▼
+POST /api/auth/login  →  JWT access_token
+     │
+     ▼
+Client stores token in localStorage
+     │
+     ▼
+All protected requests:  Authorization: Bearer <token>
+     │
+     ▼
+get_current_user()  →  decode JWT, load User from DB
 ```
 
-## Chat Flow
+Public routes: `POST /api/auth/register`, `POST /api/auth/login`. Everything else requires a valid token.
+
+---
+
+## Chat Flow (Streaming)
 
 ```
-1. User sends message via POST /chat/stream
-2. Backend saves user message to DB
-3. Load project config + prompts + history
-4. Build instructions (system prompt + prompt templates)
-5. Call LLM provider (streaming):
-   - OpenAI: Responses API with stream=true
-   - OpenRouter: Chat Completions with stream=true
-6. Stream tokens to client via SSE
-7. Save complete assistant message to DB
+1. POST /api/projects/{id}/chat/stream  { message }
+2. Verify project ownership
+3. Load message history from DB
+4. Save user message immediately
+5. Build LLMProjectConfig (provider, key, prompts, system prompt)
+6. Stream from LLM provider
+7. Emit SSE events to client (see below)
+8. On completion, open a fresh DB session and save assistant message
 ```
+
+### SSE event protocol
+
+The stream endpoint emits JSON payloads in standard SSE `data:` lines:
+
+| `type` | Meaning |
+|--------|---------|
+| `status` | Lifecycle hint: `connecting` → `thinking` → `streaming` |
+| `token` | Partial assistant text chunk |
+| `done` | Stream finished; includes saved `message` object |
+| `error` | LLM or server error message |
+
+The frontend `api.chatStream()` async generator parses these events and updates the UI incrementally.
+
+### Instruction assembly
+
+Before each LLM call, instructions are built from:
+
+1. Project `system_prompt` (if set)
+2. All prompt templates, formatted as `[name]\ncontent`
+
+For **OpenAI**, instructions are passed to the Responses API. For **OpenRouter** and **custom** providers, they are prepended as a `system` message in chat/completions format.
+
+---
 
 ## LLM Integration
 
-The `services/llm.py` module abstracts provider differences:
+| Provider | API path | Streaming |
+|----------|----------|-----------|
+| **openai** | OpenAI Responses API (`client.responses.create`) | Native SDK stream events (`response.output_text.delta`) |
+| **openrouter** | `POST /chat/completions` via httpx | Manual SSE line parsing |
+| **custom** | User-defined base URL + `/chat/completions` | Same as OpenRouter (Ollama, LM Studio, Z.AI, etc.) |
 
-| Provider | API | Streaming |
-|----------|-----|-----------|
-| OpenAI | Responses API (`client.responses.create`) | Native SSE from SDK |
-| OpenRouter | Chat Completions (`/chat/completions`) | Manual SSE parsing |
-| Custom | OpenAI-compatible endpoint | Via OpenAI SDK or OpenRouter path |
+Default base URLs:
 
-Instructions are built by concatenating the project's system prompt with all associated prompt templates.
+- OpenAI — SDK default
+- OpenRouter — `https://openrouter.ai/api/v1`
+- Custom — must be set in project settings
+
+Special handling: GLM/Z.AI models disable internal "thinking" traces so only user-visible `content` is streamed.
+
+Missing API keys are rejected with `400` before any external call. Provider failures surface as `502` with a descriptive message.
+
+---
+
+## File Uploads
+
+Files are uploaded to `POST /api/projects/{id}/files` (max **20 MB**).
+
+- **OpenAI provider**: file bytes are sent to the OpenAI Files API (`purpose=assistants`); `openai_file_id` is stored locally.
+- **Other providers**: upload is rejected — file storage is OpenAI-specific today.
+
+Deleting a file removes the local record only (no remote delete call).
+
+---
 
 ## Frontend Architecture
 
-- **React 19 + TypeScript + Vite** for fast development
-- **React Router** for client-side navigation with protected routes
-- **Auth Context** for global auth state
-- **Tailwind CSS v4** with custom dark theme and glass-morphism UI
-- **API client** (`lib/api.ts`) centralizes all backend communication including SSE streaming
+```
+frontend/src/
+├── main.tsx
+├── App.tsx                    # React Router setup
+├── context/AuthContext.tsx    # Global auth state, login/logout
+├── components/
+│   ├── ProtectedRoute.tsx     # Redirect unauthenticated users
+│   ├── ChatMessageContent.tsx # Markdown rendering for messages
+│   └── ui/                    # Button, Input, Select, Card, Textarea
+├── pages/
+│   ├── LoginPage.tsx
+│   ├── RegisterPage.tsx
+│   ├── DashboardPage.tsx      # Agent list, create/delete
+│   └── ProjectPage.tsx        # Tabbed agent workspace
+└── lib/
+    ├── api.ts                 # Typed API client + SSE parser
+    └── utils.ts
+```
 
-## Deployment Topology (Recommended)
+### Routing
+
+| Path | Access | Page |
+|------|--------|------|
+| `/login`, `/register` | Public | Auth forms |
+| `/dashboard` | Protected | Agent list |
+| `/projects/:id` | Protected | Agent workspace |
+
+### Project workspace tabs
+
+`ProjectPage` organizes each agent into four tabs:
+
+- **Chat** — message history, streaming input, clear history
+- **LLM Settings** — provider, API key, base URL, model, system prompt
+- **Prompts** — create/delete named prompt templates
+- **Files** — upload and list files (OpenAI only)
+
+### Dev proxy
+
+Vite proxies `/api` to `http://localhost:8000`, so the frontend calls same-origin `/api/...` without CORS issues during development.
+
+---
+
+## Security Model
+
+| Concern | Approach |
+|---------|----------|
+| Passwords | bcrypt via passlib; never stored in plaintext |
+| Sessions | JWT only; no server session store |
+| Authorization | Per-route ownership checks on `user_id` |
+| API keys | Per-project, returned only to owner on detail endpoints |
+| CORS | Configurable via `CORS_ORIGINS` env var |
+| Upload size | 20 MB hard limit |
+
+Production checklist: set a strong `SECRET_KEY`, use PostgreSQL, enable HTTPS, restrict CORS to your frontend origin.
+
+---
+
+## Deployment Topology
 
 ```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   Vercel /   │    │   Railway /  │    │  PostgreSQL  │
-│   Netlify    │───►│   Render     │───►│   (managed)  │
-│  (Frontend)  │    │  (Backend)   │    │              │
-└──────────────┘    └──────────────┘    └──────────────┘
+┌──────────────┐         ┌──────────────┐         ┌──────────────┐
+│   Static     │  HTTPS  │   FastAPI    │         │  PostgreSQL  │
+│   Frontend   │ ──────► │   Backend    │ ──────► │  (managed)   │
+│ Vercel/Netlify│        │ Railway/Render│        │              │
+└──────────────┘         └──────────────┘         └──────────────┘
 ```
 
-## Future Enhancements
+Build the frontend (`npm run build`) and serve `dist/` from a CDN or static host. Run the backend with `uvicorn app.main:app` behind a process manager. Point `DATABASE_URL` at PostgreSQL.
 
-- Team/organization support with role-based access
-- Usage analytics and token counting
+---
+
+## Extension Points
+
+| Area | How to extend |
+|------|---------------|
+| `services/llm.py` | Add a provider branch or new adapter function |
+| `routes/` | New modules for webhooks, analytics, teams |
+| `models.py` | New entities (organizations, usage logs, vector stores) |
+| `ProjectPage` tabs | New UI panels for RAG, tools, or integrations |
+
+### Natural next steps
+
+- Team/org support with role-based access
+- RAG over uploaded documents (vector store + retrieval)
+- Token usage tracking and rate limits per user/project
+- OAuth social login
 - Webhook integrations (Slack, Discord)
-- RAG with vector store for uploaded documents
-- Rate limiting per user/project
-- OAuth2 social login (Google, GitHub)
+- Remote file delete and non-OpenAI file backends
